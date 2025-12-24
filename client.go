@@ -12,6 +12,31 @@ import (
 	"time"
 )
 
+var _ Executor = (*Client)(nil)
+
+type Executor interface {
+	Get(ctx context.Context, path string) (*http.Response, error)
+	Post(ctx context.Context, path string, body any) (*http.Response, error)
+	Put(ctx context.Context, path string, body any) (*http.Response, error)
+	Patch(ctx context.Context, path string, body any) (*http.Response, error)
+	Delete(ctx context.Context, path string) (*http.Response, error)
+	Do(ctx context.Context, method, path string, body any) (*http.Response, error)
+	DoWithResponse(ctx context.Context, method, path string, body, result any) error
+	GetJSON(ctx context.Context, path string, result any) error
+	PostJSON(ctx context.Context, path string, body, result any) error
+	PutJSON(ctx context.Context, path string, body, result any) error
+	PatchJSON(ctx context.Context, path string, body, result any) error
+	DeleteJSON(ctx context.Context, path string, result any) error
+	GetErrorParser() *ErrorParserChain
+	SetErrorParser(parser *ErrorParserChain)
+	SetBaseURL(baseURL string)
+	SetHeader(key, value string)
+	SetHeaders(headers map[string]string)
+	RemoveHeader(key string)
+	GetHTTPClient() *http.Client
+	SetHTTPClient(httpClient *http.Client)
+}
+
 type Client struct {
 	httpClient  *http.Client
 	baseURL     string
@@ -52,15 +77,15 @@ func (c *Client) Get(ctx context.Context, path string) (*http.Response, error) {
 	return c.Do(ctx, http.MethodGet, path, nil)
 }
 
-func (c *Client) Post(ctx context.Context, path string, body interface{}) (*http.Response, error) {
+func (c *Client) Post(ctx context.Context, path string, body any) (*http.Response, error) {
 	return c.Do(ctx, http.MethodPost, path, body)
 }
 
-func (c *Client) Put(ctx context.Context, path string, body interface{}) (*http.Response, error) {
+func (c *Client) Put(ctx context.Context, path string, body any) (*http.Response, error) {
 	return c.Do(ctx, http.MethodPut, path, body)
 }
 
-func (c *Client) Patch(ctx context.Context, path string, body interface{}) (*http.Response, error) {
+func (c *Client) Patch(ctx context.Context, path string, body any) (*http.Response, error) {
 	return c.Do(ctx, http.MethodPatch, path, body)
 }
 
@@ -68,7 +93,7 @@ func (c *Client) Delete(ctx context.Context, path string) (*http.Response, error
 	return c.Do(ctx, http.MethodDelete, path, nil)
 }
 
-func (c *Client) Do(ctx context.Context, method, path string, body interface{}) (*http.Response, error) {
+func (c *Client) Do(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	url := c.buildURL(path)
 
 	var bodyReader io.Reader
@@ -111,7 +136,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body interface{}) 
 	return resp, nil
 }
 
-func (c *Client) DoWithResponse(ctx context.Context, method, path string, body, result interface{}) error {
+func (c *Client) DoWithResponse(ctx context.Context, method, path string, body, result any) error {
 	resp, err := c.Do(ctx, method, path, body)
 	if err != nil {
 		return err
@@ -138,23 +163,23 @@ func (c *Client) DoWithResponse(ctx context.Context, method, path string, body, 
 	return nil
 }
 
-func (c *Client) GetJSON(ctx context.Context, path string, result interface{}) error {
+func (c *Client) GetJSON(ctx context.Context, path string, result any) error {
 	return c.DoWithResponse(ctx, http.MethodGet, path, nil, result)
 }
 
-func (c *Client) PostJSON(ctx context.Context, path string, body, result interface{}) error {
+func (c *Client) PostJSON(ctx context.Context, path string, body, result any) error {
 	return c.DoWithResponse(ctx, http.MethodPost, path, body, result)
 }
 
-func (c *Client) PutJSON(ctx context.Context, path string, body, result interface{}) error {
+func (c *Client) PutJSON(ctx context.Context, path string, body, result any) error {
 	return c.DoWithResponse(ctx, http.MethodPut, path, body, result)
 }
 
-func (c *Client) PatchJSON(ctx context.Context, path string, body, result interface{}) error {
+func (c *Client) PatchJSON(ctx context.Context, path string, body, result any) error {
 	return c.DoWithResponse(ctx, http.MethodPatch, path, body, result)
 }
 
-func (c *Client) DeleteJSON(ctx context.Context, path string, result interface{}) error {
+func (c *Client) DeleteJSON(ctx context.Context, path string, result any) error {
 	return c.DoWithResponse(ctx, http.MethodDelete, path, nil, result)
 }
 
@@ -207,7 +232,7 @@ func (c *Client) buildURL(path string) string {
 	return fmt.Sprintf("%s/%s", c.baseURL, path)
 }
 
-func (c *Client) marshalBody(body interface{}) ([]byte, error) {
+func (c *Client) marshalBody(body any) ([]byte, error) {
 	switch v := body.(type) {
 	case []byte:
 		return v, nil
