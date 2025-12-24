@@ -113,3 +113,157 @@ func TestNewHTTPError(t *testing.T) {
 		})
 	}
 }
+
+func TestErrorParsers(t *testing.T) {
+	tests := []struct {
+		name            string
+		parser          ErrorResponseParser
+		body            string
+		expectedMessage string
+		expectedCode    string
+		expectedCorr    string
+	}{
+		{
+			name:   "sumsub error",
+			parser: &SumsubErrorParser{},
+			body: `{
+				"description": "Invalid id '12313213'",
+				"code": 400,
+				"correlationId": "36d4c16cd06b6f673976b30000000000"
+			}`,
+			expectedMessage: "Invalid id '12313213'",
+			expectedCode:    "400",
+			expectedCorr:    "36d4c16cd06b6f673976b30000000000",
+		},
+		{
+			name:   "stripe error",
+			parser: &StripeErrorParser{},
+			body: `{
+				"error": {
+					"message": "Invalid card number",
+					"type": "card_error",
+					"code": "incorrect_number",
+					"param": "number"
+				}
+			}`,
+			expectedMessage: "Invalid card number",
+			expectedCode:    "incorrect_number",
+		},
+		{
+			name:   "rfc7807 error",
+			parser: &RFC7807ErrorParser{},
+			body: `{
+				"type": "https://example.com/probs/out-of-credit",
+				"title": "You do not have enough credit",
+				"status": 403,
+				"detail": "Your current balance is 30, but that costs 50",
+				"instance": "/account/12345/msgs/abc"
+			}`,
+			expectedMessage: "Your current balance is 30, but that costs 50",
+			expectedCode:    "403",
+		},
+		{
+			name:   "generic error",
+			parser: &GenericErrorParser{},
+			body: `{
+				"error": "Resource not found",
+				"status_code": 404
+			}`,
+			expectedMessage: "Resource not found",
+			expectedCode:    "404",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := tt.parser.Parse([]byte(tt.body))
+			require.NoError(t, err)
+			require.NotNil(t, parsed)
+
+			assert.Equal(t, tt.expectedMessage, parsed.Message)
+			assert.Equal(t, tt.expectedCode, parsed.ErrorCode)
+			if tt.expectedCorr != "" {
+				assert.Equal(t, tt.expectedCorr, parsed.CorrelationID)
+			}
+		})
+	}
+}
+
+func TestErrorParserChain(t *testing.T) {
+	chain := NewErrorParserChain()
+
+	tests := []struct {
+		name            string
+		body            string
+		expectedMessage string
+		expectedCode    string
+	}{
+		{
+			name: "sumsub format",
+			body: `{
+				"description": "Invalid id",
+				"code": 400,
+				"correlationId": "abc123"
+			}`,
+			expectedMessage: "Invalid id",
+			expectedCode:    "400",
+		},
+		{
+			name: "stripe format",
+			body: `{
+				"error": {
+					"message": "Card declined",
+					"code": "card_declined"
+				}
+			}`,
+			expectedMessage: "Card declined",
+			expectedCode:    "card_declined",
+		},
+		{
+			name: "generic format",
+			body: `{
+				"message": "Something went wrong",
+				"status": 500
+			}`,
+			expectedMessage: "Something went wrong",
+			expectedCode:    "500",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := chain.Parse([]byte(tt.body))
+			require.NoError(t, err)
+			require.NotNil(t, parsed)
+
+			assert.Equal(t, tt.expectedMessage, parsed.Message)
+			if tt.expectedCode != "" {
+				assert.Equal(t, tt.expectedCode, parsed.ErrorCode)
+			}
+		})
+	}
+}
+
+func TestError_GetDetail(t *testing.T) {
+	err := &Error{
+		Details: map[string]interface{}{
+			"field":  "email",
+			"reason": "invalid format",
+			"code":   400,
+		},
+	}
+
+	val, ok := err.GetDetail("field")
+	assert.True(t, ok)
+	assert.Equal(t, "email", val)
+
+	val, ok = err.GetDetail("reason")
+	assert.True(t, ok)
+	assert.Equal(t, "invalid format", val)
+
+	_, ok = err.GetDetail("nonexistent")
+	assert.False(t, ok)
+
+	assert.True(t, err.HasDetail("field"))
+	assert.False(t, err.HasDetail("nonexistent"))
+}

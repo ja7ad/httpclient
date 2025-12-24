@@ -13,63 +13,19 @@ import (
 )
 
 type Client struct {
-	httpClient *http.Client
-	baseURL    string
-	headers    map[string]string
-	timeout    time.Duration
-}
-
-type ClientOption func(*Client)
-
-func WithBaseURL(baseURL string) ClientOption {
-	return func(c *Client) {
-		c.baseURL = strings.TrimRight(baseURL, "/")
-	}
-}
-
-func WithTimeout(timeout time.Duration) ClientOption {
-	return func(c *Client) {
-		c.timeout = timeout
-	}
-}
-
-func WithHeaders(headers map[string]string) ClientOption {
-	return func(c *Client) {
-		if c.headers == nil {
-			c.headers = make(map[string]string)
-		}
-		for k, v := range headers {
-			c.headers[k] = v
-		}
-	}
-}
-
-func WithHeader(key, value string) ClientOption {
-	return func(c *Client) {
-		if c.headers == nil {
-			c.headers = make(map[string]string)
-		}
-		c.headers[key] = value
-	}
-}
-
-func WithResilienceConfig(cfg *ResilienceConfig) ClientOption {
-	return func(c *Client) {
-		c.httpClient = NewResilientClient(cfg)
-	}
-}
-
-func WithHTTPClient(httpClient *http.Client) ClientOption {
-	return func(c *Client) {
-		c.httpClient = httpClient
-	}
+	httpClient  *http.Client
+	baseURL     string
+	headers     map[string]string
+	timeout     time.Duration
+	errorParser *ErrorParserChain
 }
 
 func NewClient(opts ...ClientOption) *Client {
 	client := &Client{
-		httpClient: http.DefaultClient,
-		headers:    make(map[string]string),
-		timeout:    30 * time.Second,
+		httpClient:  http.DefaultClient,
+		headers:     make(map[string]string),
+		timeout:     30 * time.Second,
+		errorParser: NewErrorParserChain(), // Initialize here
 	}
 
 	for _, opt := range opts {
@@ -202,6 +158,46 @@ func (c *Client) DeleteJSON(ctx context.Context, path string, result interface{}
 	return c.DoWithResponse(ctx, http.MethodDelete, path, nil, result)
 }
 
+func (c *Client) GetErrorParser() *ErrorParserChain {
+	return c.errorParser
+}
+
+func (c *Client) SetErrorParser(parser *ErrorParserChain) {
+	c.errorParser = parser
+}
+
+func (c *Client) SetBaseURL(baseURL string) {
+	c.baseURL = strings.TrimRight(baseURL, "/")
+}
+
+func (c *Client) SetHeader(key, value string) {
+	if c.headers == nil {
+		c.headers = make(map[string]string)
+	}
+	c.headers[key] = value
+}
+
+func (c *Client) SetHeaders(headers map[string]string) {
+	if c.headers == nil {
+		c.headers = make(map[string]string)
+	}
+	for k, v := range headers {
+		c.headers[k] = v
+	}
+}
+
+func (c *Client) RemoveHeader(key string) {
+	delete(c.headers, key)
+}
+
+func (c *Client) GetHTTPClient() *http.Client {
+	return c.httpClient
+}
+
+func (c *Client) SetHTTPClient(httpClient *http.Client) {
+	c.httpClient = httpClient
+}
+
 func (c *Client) buildURL(path string) string {
 	if c.baseURL == "" {
 		return path
@@ -274,56 +270,25 @@ func (c *Client) handleHTTPError(resp *http.Response, path, method string) error
 	resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
 	httpErr := newHTTPError(resp.StatusCode, url, method, requestID)
+	httpErr.ResponseBody = bodyBytes
 
 	if len(bodyBytes) > 0 {
-		var errorResponse struct {
-			Error   string `json:"error"`
-			Message string `json:"message"`
-			Details string `json:"details"`
-		}
-
-		if err := json.Unmarshal(bodyBytes, &errorResponse); err == nil {
-			if errorResponse.Error != "" {
-				httpErr.Message = errorResponse.Error
-			} else if errorResponse.Message != "" {
-				httpErr.Message = errorResponse.Message
-			} else if errorResponse.Details != "" {
-				httpErr.Message = errorResponse.Details
+		parsed, err := c.errorParser.Parse(bodyBytes)
+		if err == nil && parsed != nil {
+			if parsed.Message != "" {
+				httpErr.Message = parsed.Message
+			}
+			if parsed.ErrorCode != "" {
+				httpErr.ErrorCode = parsed.ErrorCode
+			}
+			if parsed.CorrelationID != "" {
+				httpErr.CorrelationID = parsed.CorrelationID
+			}
+			if len(parsed.Details) > 0 {
+				httpErr.Details = parsed.Details
 			}
 		}
 	}
 
 	return httpErr
-}
-
-func (c *Client) SetBaseURL(baseURL string) {
-	c.baseURL = strings.TrimRight(baseURL, "/")
-}
-
-func (c *Client) SetHeader(key, value string) {
-	if c.headers == nil {
-		c.headers = make(map[string]string)
-	}
-	c.headers[key] = value
-}
-
-func (c *Client) SetHeaders(headers map[string]string) {
-	if c.headers == nil {
-		c.headers = make(map[string]string)
-	}
-	for k, v := range headers {
-		c.headers[k] = v
-	}
-}
-
-func (c *Client) RemoveHeader(key string) {
-	delete(c.headers, key)
-}
-
-func (c *Client) GetHTTPClient() *http.Client {
-	return c.httpClient
-}
-
-func (c *Client) SetHTTPClient(httpClient *http.Client) {
-	c.httpClient = httpClient
 }
