@@ -279,6 +279,36 @@ func buildRetryPolicy(cfg *RetryPolicyConfig) retrypolicy.RetryPolicy[*http.Resp
 		builder = builder.WithJitter(cfg.Jitter)
 	}
 
+	// Configure abort conditions FIRST (highest priority)
+	if len(cfg.AbortOnStatus) > 0 {
+		builder = builder.AbortIf(func(res *http.Response, err error) bool {
+			if err != nil || res == nil {
+				return false
+			}
+
+			for _, status := range cfg.AbortOnStatus {
+				if res.StatusCode == status {
+					return true
+				}
+			}
+			return false
+		})
+	} else {
+		// Default: abort on 4xx errors (authentication, validation, etc)
+		builder = builder.AbortIf(func(res *http.Response, err error) bool {
+			if err != nil || res == nil {
+				return false
+			}
+
+			// Abort on 4xx status codes (except 429 which is rate limiting)
+			if res.StatusCode >= 400 && res.StatusCode < 500 && res.StatusCode != http.StatusTooManyRequests {
+				return true
+			}
+
+			return false
+		})
+	}
+
 	// Configure retryable status codes
 	if len(cfg.RetryableStatus) > 0 {
 		builder = builder.HandleIf(func(res *http.Response, err error) bool {
@@ -286,33 +316,33 @@ func buildRetryPolicy(cfg *RetryPolicyConfig) retrypolicy.RetryPolicy[*http.Resp
 			if err != nil {
 				return true
 			}
+
 			if res == nil {
 				return true
 			}
+
 			// Retry on specific status codes
 			for _, status := range cfg.RetryableStatus {
 				if res.StatusCode == status {
 					return true
 				}
 			}
-
 			return false
 		})
-	}
-
-	// Configure abort conditions
-	if len(cfg.AbortOnStatus) > 0 {
-		builder = builder.AbortIf(func(res *http.Response, err error) bool {
-			if err != nil || res == nil {
-				return false
-			}
-			for _, status := range cfg.AbortOnStatus {
-				if res.StatusCode == status {
-					return true
-				}
+	} else {
+		// Default: retry on 5xx and network errors only
+		builder = builder.HandleIf(func(res *http.Response, err error) bool {
+			// Always retry on network errors
+			if err != nil {
+				return true
 			}
 
-			return false
+			if res == nil {
+				return true
+			}
+
+			// Default: only retry 5xx errors
+			return res.StatusCode >= 500
 		})
 	}
 

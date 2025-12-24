@@ -20,7 +20,6 @@ A production-ready HTTP client for Go with **built-in resilience patterns** incl
 - JSON marshaling/unmarshaling built-in
 - Context support for cancellation and deadlines
 - Typed error handling with detailed context
-- Comprehensive test coverage (>95%)
 
 🏗️ **Production Ready**
 - Built on [failsafe-go](https://github.com/failsafe-go/failsafe-go) - battle-tested resilience library
