@@ -1,6 +1,6 @@
 all: false
 dir: '{{.InterfaceDir}}'
-filename: client_mock_test.go
+filename: client_mock.go
 force-file-write: true
 formatter: goimports
 generate: true
