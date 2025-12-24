@@ -45,7 +45,7 @@ type Client struct {
 	errorParser *ErrorParserChain
 }
 
-func NewClient(opts ...ClientOption) Executor {
+func NewClient(opts ...ClientOption) *Client {
 	client := &Client{
 		httpClient:  http.DefaultClient,
 		headers:     make(map[string]string),
@@ -64,7 +64,7 @@ func NewClient(opts ...ClientOption) Executor {
 	return client
 }
 
-func NewDefaultClient(baseURL string) Executor {
+func NewDefaultClient(baseURL string) *Client {
 	return NewClient(
 		WithBaseURL(baseURL),
 		WithResilienceConfig(DefaultResilienceConfig()),
