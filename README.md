@@ -21,12 +21,6 @@ A production-ready HTTP client for Go with **built-in resilience patterns** incl
 - Context support for cancellation and deadlines
 - Typed error handling with detailed context
 
-🏗️ **Production Ready**
-- Built on [failsafe-go](https://github.com/failsafe-go/failsafe-go) - battle-tested resilience library
-- Clean Architecture principles
-- Zero external dependencies (except failsafe-go)
-- Fully documented with examples
-
 ## Installation
 
 ```bash
