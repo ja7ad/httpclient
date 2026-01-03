@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -344,6 +346,19 @@ func TestClient_BuildURL(t *testing.T) {
 	}
 }
 
+func TestClient_BuildURL_PreservesQueryAndHandlesBasePath(t *testing.T) {
+	client := NewClient(WithBaseURL("https://api.example.com/v1"))
+
+	got := client.buildURL("/users?id=1&active=true#frag")
+	u, err := url.Parse(got)
+	require.NoError(t, err)
+
+	assert.Equal(t, "api.example.com", u.Host)
+	assert.Equal(t, "/v1/users", u.Path)
+	assert.Equal(t, "id=1&active=true", u.RawQuery)
+	assert.Equal(t, "frag", u.Fragment)
+}
+
 func TestClient_MarshalBody(t *testing.T) {
 	client := NewClient()
 
@@ -381,6 +396,12 @@ func TestClient_MarshalBody(t *testing.T) {
 			assert.Equal(t, tt.expected, string(result))
 		})
 	}
+}
+
+func TestClient_MarshalBody_IOReaderError(t *testing.T) {
+	client := NewClient()
+	_, err := client.marshalBody(io.NopCloser(failingReader{}))
+	require.Error(t, err)
 }
 
 func TestClient_WrapError(t *testing.T) {
@@ -655,4 +676,163 @@ func TestClient_NilBody(t *testing.T) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestClient_Do_SetsGetBodyForReplayableRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		assert.Equal(t, "hello", string(b))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	// RoundTripper that asserts GetBody is present and replay works.
+	assertRT := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		require.NotNil(t, req.GetBody)
+		rc, err := req.GetBody()
+		require.NoError(t, err)
+		defer rc.Close()
+		b, err := io.ReadAll(rc)
+		require.NoError(t, err)
+		assert.Equal(t, "hello", string(b))
+
+		return http.DefaultTransport.RoundTrip(req)
+	})
+
+	hc := &http.Client{Transport: assertRT}
+	client := NewClient(WithBaseURL(server.URL), WithHTTPClient(hc))
+
+	resp, err := client.Post(context.Background(), "/test", []byte("hello"))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestClient_Do_NilBodyDoesNotSetContentLength(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	assertRT := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		assert.Nil(t, req.GetBody)
+		assert.Equal(t, int64(0), req.ContentLength)
+		return http.DefaultTransport.RoundTrip(req)
+	})
+
+	hc := &http.Client{Transport: assertRT}
+	client := NewClient(WithBaseURL(server.URL), WithHTTPClient(hc))
+
+	resp, err := client.Post(context.Background(), "/test", nil)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+}
+
+func TestClient_DoWithResponse_EmptyBodyIsOKForNonNoContentWhenResultNil(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte{})
+	}))
+	defer server.Close()
+
+	client := NewClient(WithBaseURL(server.URL))
+	err := client.DoWithResponse(context.Background(), http.MethodGet, "/test", nil, nil)
+	require.NoError(t, err)
+}
+
+func TestClient_HandleHTTPError_ReadBodyFailure(t *testing.T) {
+	client := NewClient(WithBaseURL("https://api.example.com"))
+	resp := &http.Response{
+		StatusCode: http.StatusInternalServerError,
+		Header:     http.Header{"X-Request-ID": []string{"req-1"}},
+		Body:       io.NopCloser(failingReader{}),
+	}
+
+	err := client.handleHTTPError(resp, "/test", http.MethodGet)
+	require.Error(t, err)
+	var clientErr *Error
+	require.True(t, errors.As(err, &clientErr))
+	assert.Equal(t, ErrorTypeNetwork, clientErr.Type)
+}
+
+type failingReader struct{}
+
+func (failingReader) Read(_ []byte) (int, error) { return 0, errors.New("read failed") }
+
+func (failingReader) Close() error { return nil }
+
+func TestClient_DoWithResponse_InvalidResultPointer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"message":"ok","id":1}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(WithBaseURL(server.URL))
+	// Pass a non-pointer result - json decode should fail.
+	var result testResponse
+	err := client.GetJSON(context.Background(), "/test", result)
+	require.Error(t, err)
+	var clientErr *Error
+	require.True(t, errors.As(err, &clientErr))
+	assert.Equal(t, ErrorTypeValidation, clientErr.Type)
+}
+
+func TestClient_SetHTTPClient_IsThreadSafe(t *testing.T) {
+	client := NewClient()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			client.SetHTTPClient(&http.Client{Transport: http.DefaultTransport})
+		}
+	}()
+
+	for i := 0; i < 200; i++ {
+		_ = client.GetHTTPClient()
+	}
+
+	<-done
+}
+
+func TestClient_Do_CopyHeadersUnderLock(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Ensure header exists; value may vary if mutated concurrently.
+		assert.NotEmpty(t, r.Header.Get("X-Token"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := NewClient(WithBaseURL(server.URL), WithHeader("X-Token", "a"))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 250; i++ {
+			client.SetHeader("X-Token", fmt.Sprintf("v-%d", i))
+		}
+	}()
+
+	for i := 0; i < 50; i++ {
+		resp, err := client.Get(context.Background(), "/test")
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+	}
+
+	<-done
+}
+
+func TestNewClient_DoesNotMutateDefaultClient(t *testing.T) {
+	original := http.DefaultClient.Timeout
+	defer func() { http.DefaultClient.Timeout = original }()
+
+	http.DefaultClient.Timeout = 0
+	_ = NewClient(WithTimeout(123 * time.Millisecond))
+
+	assert.Equal(t, time.Duration(0), http.DefaultClient.Timeout)
 }
