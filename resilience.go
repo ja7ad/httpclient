@@ -5,9 +5,14 @@ import (
 	"time"
 
 	"github.com/failsafe-go/failsafe-go"
+	"github.com/failsafe-go/failsafe-go/adaptivethrottler"
+	"github.com/failsafe-go/failsafe-go/bulkhead"
+	"github.com/failsafe-go/failsafe-go/cachepolicy"
 	"github.com/failsafe-go/failsafe-go/circuitbreaker"
 	"github.com/failsafe-go/failsafe-go/failsafehttp"
 	"github.com/failsafe-go/failsafe-go/fallback"
+	"github.com/failsafe-go/failsafe-go/hedgepolicy"
+	"github.com/failsafe-go/failsafe-go/ratelimiter"
 	"github.com/failsafe-go/failsafe-go/retrypolicy"
 	"github.com/failsafe-go/failsafe-go/timeout"
 )
@@ -66,20 +71,70 @@ type FallbackConfig struct {
 	OnFallbackExecuted func(event failsafe.ExecutionDoneEvent[*http.Response])
 }
 
-// ResilienceConfig holds all resilience configurations
+// RateLimiterConfig holds rate limiter configuration
+type RateLimiterConfig struct {
+	Enabled       bool
+	MaxExecutions uint
+	Period        time.Duration
+	MaxWaitTime   time.Duration
+	IsBursty      bool // If true, uses fixed window; else uses smooth leaky bucket
+}
+
+// BulkheadConfig limits concurrent executions to prevent resource exhaustion
+type BulkheadConfig struct {
+	Enabled        bool
+	MaxConcurrency uint
+	MaxWaitTime    time.Duration
+}
+
+// HedgeConfig handles tail latency by sending backup requests
+type HedgeConfig struct {
+	Enabled        bool
+	Delay          time.Duration
+	MaxHedges      int
+	CancelOnResult bool // Cancel outstanding hedges once a result is received
+}
+
+// AdaptiveThrottlerConfig limits requests based on failure rate
+type AdaptiveThrottlerConfig struct {
+	Enabled              bool
+	FailureRateThreshold float64
+	MinExecutions        uint
+	Period               time.Duration
+	MaxRejectionRate     float64
+}
+
+// CacheConfig provides read-through caching
+type CacheConfig struct {
+	Enabled bool
+	Cache   cachepolicy.Cache[*http.Response]
+	Key     string
+}
+
+// ResilienceConfig updated with new policies
 type ResilienceConfig struct {
-	CircuitBreaker *CircuitBreakerConfig
-	RetryPolicy    *RetryPolicyConfig
-	Timeout        *TimeoutConfig
-	Fallback       *FallbackConfig
+	CircuitBreaker    *CircuitBreakerConfig
+	RetryPolicy       *RetryPolicyConfig
+	Timeout           *TimeoutConfig
+	Fallback          *FallbackConfig
+	RateLimiter       *RateLimiterConfig
+	Bulkhead          *BulkheadConfig
+	Hedge             *HedgeConfig
+	AdaptiveThrottler *AdaptiveThrottlerConfig
+	Cache             *CacheConfig
 }
 
 // ResilienceBuilder builds resilience configurations using fluent API
 type ResilienceBuilder struct {
-	circuitBreaker *CircuitBreakerConfig
-	retryPolicy    *RetryPolicyConfig
-	timeout        *TimeoutConfig
-	fallback       *FallbackConfig
+	circuitBreaker    *CircuitBreakerConfig
+	retryPolicy       *RetryPolicyConfig
+	timeout           *TimeoutConfig
+	fallback          *FallbackConfig
+	rateLimiter       *RateLimiterConfig
+	bulkhead          *BulkheadConfig
+	hedge             *HedgeConfig
+	adaptiveThrottler *AdaptiveThrottlerConfig
+	cache             *CacheConfig
 }
 
 // NewResilienceBuilder creates a new resilience configuration builder
@@ -115,13 +170,43 @@ func (rb *ResilienceBuilder) WithFallback(cfg *FallbackConfig) *ResilienceBuilde
 	return rb
 }
 
+func (rb *ResilienceBuilder) WithRateLimiter(cfg *RateLimiterConfig) *ResilienceBuilder {
+	rb.rateLimiter = cfg
+	return rb
+}
+
+func (rb *ResilienceBuilder) WithBulkhead(cfg *BulkheadConfig) *ResilienceBuilder {
+	rb.bulkhead = cfg
+	return rb
+}
+
+func (rb *ResilienceBuilder) WithHedge(cfg *HedgeConfig) *ResilienceBuilder {
+	rb.hedge = cfg
+	return rb
+}
+
+func (rb *ResilienceBuilder) WithAdaptiveThrottler(cfg *AdaptiveThrottlerConfig) *ResilienceBuilder {
+	rb.adaptiveThrottler = cfg
+	return rb
+}
+
+func (rb *ResilienceBuilder) WithCache(cfg *CacheConfig) *ResilienceBuilder {
+	rb.cache = cfg
+	return rb
+}
+
 // Build constructs the final resilience configuration
 func (rb *ResilienceBuilder) Build() *ResilienceConfig {
 	return &ResilienceConfig{
-		CircuitBreaker: rb.circuitBreaker,
-		RetryPolicy:    rb.retryPolicy,
-		Timeout:        rb.timeout,
-		Fallback:       rb.fallback,
+		CircuitBreaker:    rb.circuitBreaker,
+		RetryPolicy:       rb.retryPolicy,
+		Timeout:           rb.timeout,
+		Fallback:          rb.fallback,
+		RateLimiter:       rb.rateLimiter,
+		Bulkhead:          rb.bulkhead,
+		Hedge:             rb.hedge,
+		AdaptiveThrottler: rb.adaptiveThrottler,
+		Cache:             rb.cache,
 	}
 }
 
@@ -148,34 +233,71 @@ func buildResilientTransport(baseTransport http.RoundTripper, cfg *ResilienceCon
 	if baseTransport == nil {
 		baseTransport = http.DefaultTransport
 	}
-
 	if cfg == nil {
 		return baseTransport
 	}
 
-	rt := baseTransport
-
-	// 1. Timeout (innermost - closest to actual HTTP execution)
-	if cfg.Timeout != nil && cfg.Timeout.Enabled {
-		rt = failsafehttp.NewRoundTripper(rt, buildTimeoutPolicy(cfg.Timeout))
+	layers := []struct {
+		enabled bool
+		builder func() failsafe.Policy[*http.Response]
+	}{
+		{cfg.Fallback != nil && cfg.Fallback.Enabled, func() failsafe.Policy[*http.Response] { return buildFallbackPolicy(cfg.Fallback) }},
+		{cfg.Cache != nil && cfg.Cache.Enabled, func() failsafe.Policy[*http.Response] { return buildCachePolicy(cfg.Cache) }},
+		{cfg.RetryPolicy != nil && cfg.RetryPolicy.Enabled, func() failsafe.Policy[*http.Response] { return buildRetryPolicy(cfg.RetryPolicy) }},
+		{cfg.Hedge != nil && cfg.Hedge.Enabled, func() failsafe.Policy[*http.Response] { return buildHedgePolicy(cfg.Hedge) }},
+		{cfg.CircuitBreaker != nil && cfg.CircuitBreaker.Enabled, func() failsafe.Policy[*http.Response] { return buildCircuitBreakerPolicy(cfg.CircuitBreaker) }},
+		{cfg.RateLimiter != nil && cfg.RateLimiter.Enabled, func() failsafe.Policy[*http.Response] { return buildRateLimiterPolicy(cfg.RateLimiter) }},
+		{cfg.AdaptiveThrottler != nil && cfg.AdaptiveThrottler.Enabled, func() failsafe.Policy[*http.Response] { return buildAdaptiveThrottlerPolicy(cfg.AdaptiveThrottler) }},
+		{cfg.Bulkhead != nil && cfg.Bulkhead.Enabled, func() failsafe.Policy[*http.Response] { return buildBulkheadPolicy(cfg.Bulkhead) }},
+		{cfg.Timeout != nil && cfg.Timeout.Enabled, func() failsafe.Policy[*http.Response] { return buildTimeoutPolicy(cfg.Timeout) }},
 	}
 
-	// 2. Circuit Breaker (prevents requests when service is known to be down)
-	if cfg.CircuitBreaker != nil && cfg.CircuitBreaker.Enabled {
-		rt = failsafehttp.NewRoundTripper(rt, buildCircuitBreakerPolicy(cfg.CircuitBreaker))
+	var policies []failsafe.Policy[*http.Response]
+	for _, layer := range layers {
+		if layer.enabled {
+			policies = append(policies, layer.builder())
+		}
 	}
 
-	// 3. Retry (retries failed requests)
-	if cfg.RetryPolicy != nil && cfg.RetryPolicy.Enabled {
-		rt = failsafehttp.NewRoundTripper(rt, buildRetryPolicy(cfg.RetryPolicy))
-	}
+	return failsafehttp.NewRoundTripper(baseTransport, policies...)
+}
 
-	// 4. Fallback (outermost - provides alternative response when all else fails)
-	if cfg.Fallback != nil && cfg.Fallback.Enabled {
-		rt = failsafehttp.NewRoundTripper(rt, buildFallbackPolicy(cfg.Fallback))
-	}
+func buildHedgePolicy(cfg *HedgeConfig) hedgepolicy.HedgePolicy[*http.Response] {
+	builder := hedgepolicy.NewBuilderWithDelay[*http.Response](cfg.Delay).
+		WithMaxHedges(cfg.MaxHedges)
 
-	return rt
+	if cfg.CancelOnResult {
+		builder.CancelIf(func(res *http.Response, err error) bool {
+			return err == nil && res != nil && res.StatusCode < 500
+		})
+	}
+	return builder.Build()
+}
+
+func buildBulkheadPolicy(cfg *BulkheadConfig) bulkhead.Bulkhead[*http.Response] {
+	return bulkhead.NewBuilder[*http.Response](cfg.MaxConcurrency).
+		WithMaxWaitTime(cfg.MaxWaitTime).
+		Build() //
+}
+
+func buildRateLimiterPolicy(cfg *RateLimiterConfig) ratelimiter.RateLimiter[*http.Response] {
+	if cfg.IsBursty {
+		return ratelimiter.NewBursty[*http.Response](cfg.MaxExecutions, cfg.Period)
+	}
+	return ratelimiter.NewSmooth[*http.Response](cfg.MaxExecutions, cfg.Period) //
+}
+
+func buildAdaptiveThrottlerPolicy(cfg *AdaptiveThrottlerConfig) adaptivethrottler.AdaptiveThrottler[*http.Response] {
+	return adaptivethrottler.NewBuilder[*http.Response]().
+		WithFailureRateThreshold(cfg.FailureRateThreshold, cfg.MinExecutions, cfg.Period).
+		WithMaxRejectionRate(cfg.MaxRejectionRate).
+		Build()
+}
+
+func buildCachePolicy(cfg *CacheConfig) cachepolicy.CachePolicy[*http.Response] {
+	return cachepolicy.NewBuilder(cfg.Cache).
+		WithKey(cfg.Key).
+		Build()
 }
 
 func buildCircuitBreakerPolicy(cfg *CircuitBreakerConfig) circuitbreaker.CircuitBreaker[*http.Response] {
@@ -404,22 +526,27 @@ func DefaultResilienceConfig() *ResilienceConfig {
 			Delay:            10 * time.Second,
 		},
 		RetryPolicy: &RetryPolicyConfig{
-			Enabled:        true,
-			MaxAttempts:    3,
-			BackoffInitial: 100 * time.Millisecond,
-			BackoffMax:     10 * time.Second,
-			JitterFactor:   0.1,
-			RetryableStatus: []int{
-				http.StatusInternalServerError,
-				http.StatusBadGateway,
-				http.StatusServiceUnavailable,
-				http.StatusGatewayTimeout,
-				http.StatusTooManyRequests,
-			},
+			Enabled:         true,
+			MaxAttempts:     3,
+			BackoffInitial:  100 * time.Millisecond,
+			BackoffMax:      2 * time.Second,
+			JitterFactor:    0.1,
+			RetryableStatus: []int{500, 502, 503, 504, 429},
 		},
 		Timeout: &TimeoutConfig{
 			Enabled:  true,
-			Duration: 30 * time.Second,
+			Duration: 15 * time.Second,
+		},
+		RateLimiter: &RateLimiterConfig{
+			Enabled:       true,
+			MaxExecutions: 100,
+			Period:        time.Second,
+			MaxWaitTime:   500 * time.Millisecond,
+		},
+		Bulkhead: &BulkheadConfig{
+			Enabled:        true,
+			MaxConcurrency: 20,
+			MaxWaitTime:    time.Second,
 		},
 	}
 }
