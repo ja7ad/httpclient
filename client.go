@@ -46,6 +46,9 @@ type Client struct {
 	timeout     time.Duration
 	errorParser *ErrorParserChain
 
+	marshal   JSONMarshal
+	unmarshal JSONUnmarshal
+
 	mu sync.RWMutex
 }
 
@@ -58,6 +61,8 @@ func NewClient(opts ...ClientOption) *Client {
 		headers:     make(map[string]string),
 		timeout:     30 * time.Second,
 		errorParser: NewErrorParserChain(),
+		marshal:     json.Marshal,
+		unmarshal:   json.Unmarshal,
 	}
 
 	for _, opt := range opts {

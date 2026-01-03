@@ -86,6 +86,53 @@ Available `ClientOption`s:
 - `WithHTTPClient(httpClient *http.Client)`
 - `WithErrorParser(parser ErrorResponseParser)` (adds a parser to the error parsing chain)
 
+## Make Client Faster
+
+We use encoding/json as default json library due to stability and producibility. However, the standard library is a 
+bit slow compared to 3rd party libraries. If you're not happy with the performance of encoding/json, we recommend you 
+to use these libraries:
+
+- [goccy/go-json](https://github.com/goccy/go-json)
+- [bytedance/sonic](https://github.com/bytedance/sonic)
+- [segmentio/encoding](https://github.com/segmentio/encoding)
+- [mailru/easyjson](https://github.com/mailru/easyjson)
+- [minio/simdjson-go](https://github.com/minio/simdjson-go)
+- [wI2L/jettison](https://github.com/wI2L/jettison)
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	"github.com/ja7ad/httpclient"
+	"github.com/bytedance/sonic"
+)
+
+type User struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+func main() {
+	// NewDefaultClient sets JSON headers and enables a production-ready resilience config.
+	client := httpclient.NewClient(
+		httpclient.WithBaseURL("https://jsonplaceholder.typicode.com"),
+	    httpclient.WithCustomJsonMarshaler(sonic.Marshal),
+        httpclient.WithCustomJsonUnmarshaler(sonic.Unmarshal),
+	)
+
+	var user User
+	if err := client.GetJSON(context.Background(), "/users/1", &user); err != nil {
+		log.Fatalf("request failed: %v", err)
+	}
+
+	fmt.Printf("User: %+v\n", user)
+}
+```
+
 ## Resilience
 
 ### How policies are applied
