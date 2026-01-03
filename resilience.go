@@ -228,7 +228,7 @@ func NewResilientTransport(baseTransport http.RoundTripper, cfg *ResilienceConfi
 
 // buildResilientTransport constructs a RoundTripper with all configured policies
 // Policies are applied by wrapping one at a time in this order (innermost to outermost):
-// Base Transport -> Timeout -> CircuitBreaker -> Retry -> Fallback
+// Order: Fallback -> Cache -> Retry -> Hedge -> CB -> RateLimit -> Throttle -> Bulkhead -> Timeout
 func buildResilientTransport(baseTransport http.RoundTripper, cfg *ResilienceConfig) http.RoundTripper {
 	if baseTransport == nil {
 		baseTransport = http.DefaultTransport
@@ -237,10 +237,15 @@ func buildResilientTransport(baseTransport http.RoundTripper, cfg *ResilienceCon
 		return baseTransport
 	}
 
-	layers := []struct {
+	var policies []failsafe.Policy[*http.Response]
+
+	// NOTE: Order matters; policies are applied in the order they are appended here.
+	type policyEntry struct {
 		enabled bool
-		builder func() failsafe.Policy[*http.Response]
-	}{
+		build   func() failsafe.Policy[*http.Response]
+	}
+
+	entries := []policyEntry{
 		{cfg.Fallback != nil && cfg.Fallback.Enabled, func() failsafe.Policy[*http.Response] { return buildFallbackPolicy(cfg.Fallback) }},
 		{cfg.Cache != nil && cfg.Cache.Enabled, func() failsafe.Policy[*http.Response] { return buildCachePolicy(cfg.Cache) }},
 		{cfg.RetryPolicy != nil && cfg.RetryPolicy.Enabled, func() failsafe.Policy[*http.Response] { return buildRetryPolicy(cfg.RetryPolicy) }},
@@ -252,11 +257,11 @@ func buildResilientTransport(baseTransport http.RoundTripper, cfg *ResilienceCon
 		{cfg.Timeout != nil && cfg.Timeout.Enabled, func() failsafe.Policy[*http.Response] { return buildTimeoutPolicy(cfg.Timeout) }},
 	}
 
-	var policies []failsafe.Policy[*http.Response]
-	for _, layer := range layers {
-		if layer.enabled {
-			policies = append(policies, layer.builder())
+	for _, e := range entries {
+		if !e.enabled {
+			continue
 		}
+		policies = append(policies, e.build())
 	}
 
 	return failsafehttp.NewRoundTripper(baseTransport, policies...)
