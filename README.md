@@ -5,21 +5,28 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/ja7ad/httpclient)](https://goreportcard.com/report/github.com/ja7ad/httpclient)
 [![GoDoc](https://godoc.org/github.com/ja7ad/httpclient?status.svg)](https://godoc.org/github.com/ja7ad/httpclient)
 
-A production-ready HTTP client for Go with **built-in resilience patterns** including retry policies, circuit breakers, timeouts, and fallback mechanisms. Perfect for building reliable microservices and external API integrations.
+A production-ready HTTP client for Go with **built-in resilience patterns** (retry, circuit breaker, timeouts, fallback, and more). It’s designed for reliable microservices and external API integrations.
 
 ## Features
 
-✨ **Resilience Patterns**
-- 🔄 **Retry Policy** - Exponential backoff, jitter, max attempts/duration
-- ⚡ **Circuit Breaker** - Prevent cascading failures with automatic recovery
-- ⏱️ **Timeout** - Request-level and global timeout controls
-- 🛡️ **Fallback** - Graceful degradation with custom fallback responses
+### Resilience patterns (built-in)
 
-🎯 **Developer Experience**
-- Simple, intuitive API with method chaining
-- JSON marshaling/unmarshaling built-in
-- Context support for cancellation and deadlines
-- Typed error handling with detailed context
+- **Retry policy**: max attempts/retries, max duration, fixed delay, exponential backoff, random delay, jitter
+- **Circuit breaker**: count- or ratio-based thresholds with open/half-open/close hooks
+- **Timeout**: per-execution timeout policy (in addition to `context.Context`)
+- **Fallback**: custom fallback response when failures happen
+- **Rate limiter**: smooth or bursty limiting
+- **Bulkhead**: limit concurrent executions and queue wait time
+- **Hedging**: tail-latency hedging with optional cancellation on first good result
+- **Adaptive throttling**: automatically reject requests when failure rate is high
+- **Cache (read-through)**: cache `*http.Response` via `failsafe-go` cache policy
+
+### Developer experience
+
+- Simple API (`Get`, `Post`, `Do`, plus `*JSON` helpers)
+- Built-in JSON marshaling/unmarshaling
+- `context.Context` support for cancellation and deadlines
+- Typed errors with rich context + pluggable error body parsers
 
 ## Installation
 
@@ -27,9 +34,7 @@ A production-ready HTTP client for Go with **built-in resilience patterns** incl
 go get github.com/ja7ad/httpclient
 ```
 
-## Examples
-
-### Basic
+## Quick start
 
 ```go
 package main
@@ -43,129 +48,53 @@ import (
 )
 
 type User struct {
-	ID       int    `json:"id"`
-	Name     string `json:"name"`
-	Email    string `json:"email"`
-	Username string `json:"username"`
+	ID   int    `json:"id"`
+	Name string `json:"name"`
 }
 
 func main() {
+	// NewDefaultClient sets JSON headers and enables a production-ready resilience config.
 	client := httpclient.NewDefaultClient("https://jsonplaceholder.typicode.com")
 
 	var user User
-	err := client.GetJSON(context.Background(), "/users/1", &user)
-	if err != nil {
-		log.Fatalf("Failed to get user: %v", err)
+	if err := client.GetJSON(context.Background(), "/users/1", &user); err != nil {
+		log.Fatalf("request failed: %v", err)
 	}
 
-	fmt.Printf("User ID: %d\n", user.ID)
-	fmt.Printf("Name: %s\n", user.Name)
-	fmt.Printf("Email: %s\n", user.Email)
-	fmt.Printf("Username: %s\n", user.Username)
+	fmt.Printf("User: %+v\n", user)
 }
 ```
 
-### CRUD
+## Client configuration
 
-```go
-package main
+### Constructors
 
-import (
-	"context"
-	"fmt"
-	"log"
+- `NewDefaultClient(baseURL)`
+  - sets `Content-Type: application/json` and `Accept: application/json`
+  - enables `DefaultResilienceConfig()`
+- `NewClient(...ClientOption)`
+  - fully configurable via options
 
-	"github.com/ja7ad/httpclient"
-)
+### Options
 
-type Post struct {
-	ID     int    `json:"id"`
-	UserID int    `json:"userId"`
-	Title  string `json:"title"`
-	Body   string `json:"body"`
-}
+Available `ClientOption`s:
 
-type CreatePostRequest struct {
-	UserID int    `json:"userId"`
-	Title  string `json:"title"`
-	Body   string `json:"body"`
-}
+- `WithBaseURL(baseURL string)`
+- `WithTimeout(timeout time.Duration)` (applied to `http.Client.Timeout` when it’s 0)
+- `WithHeader(key, value string)` / `WithHeaders(map[string]string)`
+- `WithResilienceConfig(cfg *ResilienceConfig)` (wraps the transport with resilience policies)
+- `WithHTTPClient(httpClient *http.Client)`
+- `WithErrorParser(parser ErrorResponseParser)` (adds a parser to the error parsing chain)
 
-func main() {
-	client := httpclient.NewDefaultClient("https://jsonplaceholder.typicode.com")
-	ctx := context.Background()
+## Resilience
 
-	fmt.Println("=== GET: Fetch a post ===")
-	getExample(client, ctx)
+### How policies are applied
 
-	fmt.Println("\n=== POST: Create a new post ===")
-	postExample(client, ctx)
+Policies wrap a base `http.RoundTripper` in this order (innermost → outermost):
 
-	fmt.Println("\n=== PUT: Update a post ===")
-	putExample(client, ctx)
+**Fallback → Cache → Retry → Hedge → CircuitBreaker → RateLimiter → AdaptiveThrottler → Bulkhead → Timeout**
 
-	fmt.Println("\n=== DELETE: Delete a post ===")
-	deleteExample(client, ctx)
-}
-
-func getExample(client *httpclient.Client, ctx context.Context) {
-	var post Post
-	err := client.GetJSON(ctx, "/posts/1", &post)
-	if err != nil {
-		log.Printf("GET failed: %v", err)
-		return
-	}
-
-	fmt.Printf("Post: %+v\n", post)
-}
-
-func postExample(client *httpclient.Client, ctx context.Context) {
-	newPost := CreatePostRequest{
-		UserID: 1,
-		Title:  "My New Post",
-		Body:   "This is the content of my new post",
-	}
-
-	var createdPost Post
-	err := client.PostJSON(ctx, "/posts", newPost, &createdPost)
-	if err != nil {
-		log.Printf("POST failed: %v", err)
-		return
-	}
-
-	fmt.Printf("Created Post: %+v\n", createdPost)
-}
-
-func putExample(client *httpclient.Client, ctx context.Context) {
-	updatedPost := CreatePostRequest{
-		UserID: 1,
-		Title:  "Updated Post Title",
-		Body:   "This is the updated content",
-	}
-
-	var post Post
-	err := client.PutJSON(ctx, "/posts/1", updatedPost, &post)
-	if err != nil {
-		log.Printf("PUT failed: %v", err)
-		return
-	}
-
-	fmt.Printf("Updated Post: %+v\n", post)
-}
-
-func deleteExample(client *httpclient.Client, ctx context.Context) {
-	resp, err := client.Delete(ctx, "/posts/1")
-	if err != nil {
-		log.Printf("DELETE failed: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	fmt.Printf("Delete Status: %d\n", resp.StatusCode)
-}
-```
-
-### With Resilience
+### Using `ResilienceConfig`
 
 ```go
 package main
@@ -183,39 +112,53 @@ import (
 )
 
 func main() {
-	fmt.Println("=== Retry Example ===")
-	retryExample()
-
-	fmt.Println("\n=== Circuit Breaker Example ===")
-	circuitBreakerExample()
-
-	fmt.Println("\n=== Timeout Example ===")
-	timeoutExample()
-
-	fmt.Println("\n=== Combined Resilience Example ===")
-	combinedExample()
-
-	fmt.Println("\n=== Fallback Example ===")
-	fallbackExample()
-}
-
-func retryExample() {
 	cfg := &httpclient.ResilienceConfig{
 		RetryPolicy: &httpclient.RetryPolicyConfig{
 			Enabled:        true,
 			MaxAttempts:    5,
 			BackoffInitial: 100 * time.Millisecond,
-			BackoffMax:     5 * time.Second,
+			BackoffMax:     3 * time.Second,
 			JitterFactor:   0.2,
 			RetryableStatus: []int{
 				http.StatusInternalServerError,
 				http.StatusBadGateway,
 				http.StatusServiceUnavailable,
 				http.StatusGatewayTimeout,
+				http.StatusTooManyRequests,
 			},
 			OnRetry: func(event failsafe.ExecutionEvent[*http.Response]) {
-				fmt.Printf("Retry attempt #%d\n", event.Attempts())
+				fmt.Printf("retry attempt: %d\n", event.Attempts())
 			},
+		},
+		CircuitBreaker: &httpclient.CircuitBreakerConfig{
+			Enabled:          true,
+			FailureThreshold: 3,
+			SuccessThreshold: 2,
+			Delay:            5 * time.Second,
+			OnOpen: func(event circuitbreaker.StateChangedEvent) {
+				fmt.Println("circuit opened")
+			},
+			OnHalfOpen: func(event circuitbreaker.StateChangedEvent) {
+				fmt.Println("circuit half-open")
+			},
+			OnClose: func(event circuitbreaker.StateChangedEvent) {
+				fmt.Println("circuit closed")
+			},
+		},
+		Timeout: &httpclient.TimeoutConfig{
+			Enabled:  true,
+			Duration: 10 * time.Second,
+		},
+		RateLimiter: &httpclient.RateLimiterConfig{
+			Enabled:       true,
+			MaxExecutions: 50,
+			Period:        time.Second,
+			IsBursty:      false,
+		},
+		Bulkhead: &httpclient.BulkheadConfig{
+			Enabled:        true,
+			MaxConcurrency: 10,
+			MaxWaitTime:    200 * time.Millisecond,
 		},
 	}
 
@@ -226,138 +169,85 @@ func retryExample() {
 
 	resp, err := client.Get(context.Background(), "/200")
 	if err != nil {
-		log.Printf("Request failed: %v", err)
-		return
+		log.Fatalf("request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
-	fmt.Printf("Success! Status: %d\n", resp.StatusCode)
+	fmt.Println("status:", resp.StatusCode)
 }
+```
 
-func circuitBreakerExample() {
-	cfg := &httpclient.ResilienceConfig{
-		CircuitBreaker: &httpclient.CircuitBreakerConfig{
-			Enabled:          true,
-			FailureThreshold: 3,
-			SuccessThreshold: 2,
-			Delay:            5 * time.Second,
-			OnOpen: func(event circuitbreaker.StateChangedEvent) {
-				fmt.Println("⚠️  Circuit breaker opened!")
-			},
-			OnClose: func(event circuitbreaker.StateChangedEvent) {
-				fmt.Println("✅ Circuit breaker closed!")
-			},
-			OnHalfOpen: func(event circuitbreaker.StateChangedEvent) {
-				fmt.Println("🔄 Circuit breaker half-open, testing...")
-			},
-		},
-	}
+### Using `ResilienceBuilder` (fluent)
 
-	client := httpclient.NewClient(
-		httpclient.WithBaseURL("https://httpstat.us"),
-		httpclient.WithResilienceConfig(cfg),
-	)
+```go
+package main
 
-	for i := 1; i <= 5; i++ {
-		fmt.Printf("\nRequest #%d\n", i)
-		resp, err := client.Get(context.Background(), "/200")
-		if err != nil {
-			log.Printf("Request failed: %v", err)
-			continue
-		}
-		resp.Body.Close()
-		fmt.Printf("Success! Status: %d\n", resp.StatusCode)
-	}
-}
+import (
+	"time"
 
-func timeoutExample() {
-	cfg := &httpclient.ResilienceConfig{
-		Timeout: &httpclient.TimeoutConfig{
-			Enabled:  true,
-			Duration: 2 * time.Second,
-			OnTimeoutExceeded: func(event failsafe.ExecutionDoneEvent[*http.Response]) {
-				fmt.Println("⏰ Request timed out!")
-			},
-		},
-	}
+	"github.com/ja7ad/httpclient"
+)
 
-	client := httpclient.NewClient(
-		httpclient.WithBaseURL("https://httpstat.us"),
-		httpclient.WithResilienceConfig(cfg),
-	)
-
-	resp, err := client.Get(context.Background(), "/200?sleep=1000")
-	if err != nil {
-		log.Printf("Request failed: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	fmt.Printf("Success within timeout! Status: %d\n", resp.StatusCode)
-}
-
-func combinedExample() {
-	cfg := &httpclient.ResilienceConfig{
-		CircuitBreaker: &httpclient.CircuitBreakerConfig{
+func main() {
+	cfg := httpclient.NewResilienceBuilder().
+		WithRetryPolicy(&httpclient.RetryPolicyConfig{
+			Enabled:        true,
+			MaxAttempts:    3,
+			BackoffInitial: 100 * time.Millisecond,
+			BackoffMax:     2 * time.Second,
+			JitterFactor:   0.1,
+		}).
+		WithCircuitBreaker(&httpclient.CircuitBreakerConfig{
 			Enabled:          true,
 			FailureThreshold: 5,
 			SuccessThreshold: 2,
 			Delay:            10 * time.Second,
-		},
-		RetryPolicy: &httpclient.RetryPolicyConfig{
+		}).
+		WithRateLimiter(&httpclient.RateLimiterConfig{
+			Enabled:       true,
+			MaxExecutions: 100,
+			Period:        time.Second,
+			IsBursty:      true,
+		}).
+		WithBulkhead(&httpclient.BulkheadConfig{
 			Enabled:        true,
-			MaxAttempts:    3,
-			BackoffInitial: 100 * time.Millisecond,
-			BackoffMax:     10 * time.Second,
-			JitterFactor:   0.1,
-			RetryableStatus: []int{
-				http.StatusInternalServerError,
-				http.StatusBadGateway,
-				http.StatusServiceUnavailable,
-			},
-		},
-		Timeout: &httpclient.TimeoutConfig{
-			Enabled:  true,
-			Duration: 30 * time.Second,
-		},
-	}
+			MaxConcurrency: 20,
+			MaxWaitTime:    time.Second,
+		}).
+		Build()
 
-	client := httpclient.NewClient(
-		httpclient.WithBaseURL("https://jsonplaceholder.typicode.com"),
-		httpclient.WithResilienceConfig(cfg),
-	)
-
-	type User struct {
-		ID   int    `json:"id"`
-		Name string `json:"name"`
-	}
-
-	var user User
-	err := client.GetJSON(context.Background(), "/users/1", &user)
-	if err != nil {
-		log.Printf("Request failed: %v", err)
-		return
-	}
-
-	fmt.Printf("User: %+v\n", user)
+	_ = cfg
 }
+```
 
-func fallbackExample() {
+### Fallback example
+
+```go
+package main
+
+import (
+	"context"
+	"io"
+	"log"
+	"net/http"
+	"strings"
+
+	"github.com/failsafe-go/failsafe-go"
+	"github.com/ja7ad/httpclient"
+)
+
+func main() {
 	cfg := &httpclient.ResilienceConfig{
 		Fallback: &httpclient.FallbackConfig{
 			Enabled: true,
 			FallbackFunc: func(exec failsafe.Execution[*http.Response]) (*http.Response, error) {
-				fmt.Println("🛡️  Fallback triggered! Returning cached response...")
-				
-				cachedResponse := `{"id": 1, "name": "Cached User", "email": "cached@example.com"}`
+				// Return a synthetic response when the primary request fails.
+				body := `{"id": 1, "name": "Cached User"}`
 				return &http.Response{
 					StatusCode: http.StatusOK,
-					Body:       http.NoBody,
-					Header:     make(http.Header),
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(body)),
 				}, nil
-			},
-			OnFallbackExecuted: func(event failsafe.ExecutionDoneEvent[*http.Response]) {
-				fmt.Println("✅ Fallback executed successfully")
 			},
 		},
 	}
@@ -369,22 +259,45 @@ func fallbackExample() {
 
 	resp, err := client.Get(context.Background(), "/users/1")
 	if err != nil {
-		log.Printf("Request failed: %v", err)
-		return
+		log.Fatalf("request failed: %v", err)
 	}
 	defer resp.Body.Close()
 
-	fmt.Printf("Response Status: %d\n", resp.StatusCode)
+	log.Println("status:", resp.StatusCode)
 }
 ```
 
-### Custom Error Response
+## Errors
+
+All errors returned by this package are standard Go `error`s. For richer information, use `errors.As` to unwrap `*httpclient.Error`.
+
+### Typed error fields
+
+`*httpclient.Error` includes:
+
+- `Type` (`timeout`, `network`, `http`, `retry_exhausted`, `validation`, `unknown`)
+- `StatusCode` (for HTTP errors)
+- `URL`, `Method`
+- `RequestID` (from `X-Request-ID`, if present)
+- `CorrelationID`, `ErrorCode`, `Details` (parsed from the error response body when possible)
+
+### Custom error response parsing
+
+By default, the client parses common API error formats using an `ErrorParserChain`:
+
+1. Sumsub
+2. Stripe
+3. RFC 7807 (Problem Details)
+4. Generic JSON parser (always last)
+
+You can add your own parser with `WithErrorParser(...)`:
 
 ```go
 package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 
@@ -392,31 +305,33 @@ import (
 )
 
 func main() {
-	// Create client with automatic error parsing
 	client := httpclient.NewDefaultClient("https://api.sumsub.com")
 	client.SetHeader("Authorization", "Bearer your-token")
 
-	var result map[string]interface{}
+	var result map[string]any
 	err := client.GetJSON(context.Background(), "/resources/applicants/12313213", &result)
-	
-	if err != nil {
-		var httpErr *httpclient.Error
-		if errors.As(err, &httpErr) {
-			fmt.Printf("Error: %s\n", httpErr.Message)
-			fmt.Printf("Status Code: %d\n", httpErr.StatusCode)
-			fmt.Printf("Error Code: %s\n", httpErr.ErrorCode)
-			fmt.Printf("Correlation ID: %s\n", httpErr.CorrelationID)
-			
-			// Access specific details
-			if desc, ok := httpErr.GetDetail("description"); ok {
-				fmt.Printf("Description: %v\n", desc)
-			}
-			
-			// Check all details
-			for key, value := range httpErr.Details {
-				fmt.Printf("%s: %v\n", key, value)
-			}
-		}
+	if err == nil {
+		return
 	}
+
+	var httpErr *httpclient.Error
+	if errors.As(err, &httpErr) {
+		fmt.Printf("type: %s\n", httpErr.Type)
+		fmt.Printf("message: %s\n", httpErr.Message)
+		fmt.Printf("status: %d\n", httpErr.StatusCode)
+		fmt.Printf("errorCode: %s\n", httpErr.ErrorCode)
+		fmt.Printf("correlationID: %s\n", httpErr.CorrelationID)
+		if v, ok := httpErr.GetDetail("description"); ok {
+			fmt.Printf("description: %v\n", v)
+		}
+		return
+	}
+
+	log.Printf("request failed: %v", err)
 }
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
