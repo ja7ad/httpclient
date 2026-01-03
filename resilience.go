@@ -288,10 +288,24 @@ func buildRateLimiterPolicy(cfg *RateLimiterConfig) ratelimiter.RateLimiter[*htt
 }
 
 func buildAdaptiveThrottlerPolicy(cfg *AdaptiveThrottlerConfig) adaptivethrottler.AdaptiveThrottler[*http.Response] {
-	return adaptivethrottler.NewBuilder[*http.Response]().
+	builder := adaptivethrottler.NewBuilder[*http.Response]().
 		WithFailureRateThreshold(cfg.FailureRateThreshold, cfg.MinExecutions, cfg.Period).
-		WithMaxRejectionRate(cfg.MaxRejectionRate).
-		Build()
+		WithMaxRejectionRate(cfg.MaxRejectionRate)
+
+	// Treat network errors and HTTP 5xx responses as failures by default.
+	// (By default, net/http only returns an error for transport-level failures;
+	// HTTP 5xx still produces a non-nil response, so we must classify it.)
+	builder = builder.HandleIf(func(res *http.Response, err error) bool {
+		if err != nil {
+			return true
+		}
+		if res == nil {
+			return true
+		}
+		return res.StatusCode >= 500
+	})
+
+	return builder.Build()
 }
 
 func buildCachePolicy(cfg *CacheConfig) cachepolicy.CachePolicy[*http.Response] {
